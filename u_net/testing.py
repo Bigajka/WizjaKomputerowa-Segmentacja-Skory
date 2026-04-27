@@ -10,8 +10,8 @@ import segmentation_models_pytorch as smp
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 #MODEL_PATH = "models/unet_skin_1.pth"
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "unet_skin_1.pth")
-INPUT_IMAGE = os.path.join(os.path.dirname(__file__), "wanted.jpg")
-#INPUT_IMAGE = "wojtas3.jpg"
+#INPUT_IMAGE = os.path.join(os.path.dirname(__file__), "goddamn.png")
+INPUT_IMAGE = os.path.join(os.path.dirname(__file__), "im04000.png")
 OUTPUT_DIR = "results"
 
 if not os.path.exists(OUTPUT_DIR):
