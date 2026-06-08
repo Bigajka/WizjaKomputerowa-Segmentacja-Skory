@@ -1,4 +1,5 @@
 import os
+import cv2
 import random
 import torch
 import numpy as np
@@ -33,14 +34,22 @@ FOLDER_MAPPING = {
     "FamilyPhoto": "GroundT_FamilyPhoto"
 }
 
+# Transformacja dla modelu (z normalizacja i tensorami)
 test_transform = A.Compose([
-    A.Resize(512, 512), 
+    A.LongestMaxSize(max_size=512), 
+    A.PadIfNeeded(min_height=512, min_width=512, border_mode=cv2.BORDER_REFLECT_101),
     A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ToTensorV2()
 ])
 
+# Transformacja tylko do wyswietlania (aby oryginal mial identyczna geometrie co maski)
+vis_transform = A.Compose([
+    A.LongestMaxSize(max_size=512), 
+    A.PadIfNeeded(min_height=512, min_width=512, border_mode=cv2.BORDER_REFLECT_101)
+])
+
 # ==========================================
-# FUNKCJE ZBIERAJĄCE
+# FUNKCJE ZBIERAJACE
 # ==========================================
 def zbierz_pary_pratheepan(image_root, mask_root, mapping):
     pary = []
@@ -67,9 +76,10 @@ def zbierz_pary_pratheepan(image_root, mask_root, mapping):
     return pary
 
 class VisDataset(Dataset):
-    def __init__(self, lista_par, transform=None):
+    def __init__(self, lista_par, transform=None, vis_transform=None):
         self.lista_par = lista_par
         self.transform = transform
+        self.vis_transform = vis_transform
 
     def __len__(self):
         return len(self.lista_par)
@@ -77,21 +87,20 @@ class VisDataset(Dataset):
     def __getitem__(self, idx):
         img_path, mask_path, img_name = self.lista_par[idx]
 
-        # Wczytujemy oryginalny obraz i skalujemy go tylko do wyświetlania
-        orig_pil = Image.open(img_path).convert("RGB")
-        orig_resized = orig_pil.resize((512, 512))
-        orig_img_np = np.array(orig_resized)
-        
-        image = np.array(orig_pil)
+        image = np.array(Image.open(img_path).convert("RGB"))
         mask = np.array(Image.open(mask_path).convert("L"))
         mask = (mask > 127).astype(np.int64)
+
+        if self.vis_transform:
+            orig_img_np = self.vis_transform(image=image)["image"]
+        else:
+            orig_img_np = image
 
         if self.transform:
             augmented = self.transform(image=image, mask=mask)
             image_tensor = augmented["image"]
             mask_tensor = augmented["mask"].clone().detach().to(torch.long)
         
-        # Zwracamy również 'orig_img_np', żeby narysować prawdziwe kolory
         return {
             "pixel_values": image_tensor, 
             "labels": mask_tensor, 
@@ -100,26 +109,23 @@ class VisDataset(Dataset):
         }
 
 # ==========================================
-# GŁÓWNA PĘTLA WIZUALIZACJI
+# GLOWNA PETLA WIZUALIZACJI
 # ==========================================
 if __name__ == "__main__":
     print("Skanowanie struktury Pratheepan Dataset...")
     wszystkie_pary = zbierz_pary_pratheepan(IMAGE_ROOT, MASK_ROOT, FOLDER_MAPPING)
     
     if len(wszystkie_pary) == 0:
-        print("Błąd krytyczny: Skrypt nie znalazł par obraz-maska. Przerywam.")
+        print("Blad krytyczny: Skrypt nie znalazl par obraz-maska. Przerywam.")
         exit(1)
         
-    # 1. Losujemy dokładnie 5 par
-    random.seed(42) # Ustawione, aby za każdym uruchomieniem były te same obrazki. Zmień/usuń aby losować inaczej.
+    # 1. Losujemy dokladnie 5 par
+    random.seed(42) 
     wylosowane_pary = random.sample(wszystkie_pary, min(5, len(wszystkie_pary)))
     
-    test_dataset = VisDataset(wylosowane_pary, transform=test_transform)
-    # Batch size 1, by iterować po obrazkach pojedynczo
+    test_dataset = VisDataset(wylosowane_pary, transform=test_transform, vis_transform=vis_transform)
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
-    # Przygotowanie struktury na wyniki
-    # Zawiera: {"orig": [...], "gt": [...], "Nazwa_Modelu_1": [...], ...}
     wyniki_wizualne = {
         "orig": [],
         "gt": [],
@@ -131,7 +137,7 @@ if __name__ == "__main__":
         "DLV3+ (R101)": []
     }
 
-    # Wyciągamy oryginały i Ground Truth z Loadera
+    # Wyciagamy oryginaly i Ground Truth z Loadera
     for batch in test_loader:
         wyniki_wizualne["orig"].append(batch["orig_img"][0].numpy())
         wyniki_wizualne["gt"].append(batch["labels"][0].numpy())
@@ -146,11 +152,10 @@ if __name__ == "__main__":
         {"name": "DLV3+ (R101)", "type": "deeplabv3plus_r101", "path": DEEPLABV3P_R101_PATH},
     ]
 
-    # --- 3. INFERENCJA (Model po modelu) ---
+    # --- 3. INFERENCJA ---
     for config in models_config:
         print(f"\nGenerowanie masek dla: {config['name']}...")
         try:
-            # Tworzenie modelu
             if config["type"] == "segformer":
                 model = SegformerForSemanticSegmentation.from_pretrained(config["path"], num_labels=2, ignore_mismatched_sizes=True).to(DEVICE)
             elif config["type"] == "unet":
@@ -168,7 +173,6 @@ if __name__ == "__main__":
             elif config["type"] == "deeplabv3plus_r101":
                 model = smp.DeepLabV3Plus(encoder_name="resnet101", encoder_weights=None, in_channels=3, classes=2)
 
-            # Ładowanie wag (pomijamy dla SegFormera, bo ładuje sam z folderu)
             if config["type"] != "segformer":
                 state_dict = torch.load(config['path'], map_location=DEVICE, weights_only=True)
                 if 'state_dict' in state_dict:
@@ -180,7 +184,6 @@ if __name__ == "__main__":
             
             model.eval()
             
-            # Przewidywanie na 5 obrazach
             with torch.no_grad():
                 for batch in test_loader:
                     images = batch["pixel_values"].to(DEVICE)
@@ -195,32 +198,29 @@ if __name__ == "__main__":
                     elif config["type"] in ["deeplabv3_r50", "deeplabv3_r101"]:
                         probs = torch.softmax(model(images)["out"].float(), dim=1)[:, 1]
                         pred_bin = (probs > 0.5)
-                    else: # deeplabv3plus
+                    else: 
                         probs = torch.softmax(model(images).float(), dim=1)[:, 1]
                         pred_bin = (probs > 0.5)
                         
-                    # Zapisujemy wynik do słownika
                     wyniki_wizualne[config['name']].append(pred_bin[0].cpu().numpy())
 
-            # Czyścimy pamięć
             del model
             torch.cuda.empty_cache()
-            print(f"Zakończono: {config['name']}")
+            print(f"Zakonczono: {config['name']}")
             
         except Exception as e:
-            print(f"Błąd modelu {config['name']}: {e}")
-            # Wypełniamy pustymi maskami, żeby nie zepsuć siatki wykresów
+            print(f"Blad modelu {config['name']}: {e}")
             for _ in range(len(wylosowane_pary)):
                 wyniki_wizualne[config['name']].append(np.zeros((512, 512)))
 
-    # --- 4. RYSOWANIE SIATKI ---
-    print("\nGenerowanie wykresu (siatki 5x8)...")
     kolumny = ["orig", "gt", "SegFormer", "UNet", "DLV3 (R50)", "DLV3 (R101)", "DLV3+ (R50)", "DLV3+ (R101)"]
-    tytuly = ["Oryginał", "Prawda (GT)", "SegFormer", "UNet", "DLV3 R50", "DLV3 R101", "DLV3+ R50", "DLV3+ R101"]
+    tytuly = ["Oryginal", "Prawda (GT)", "SegFormer", "UNet", "DLV3 R50", "DLV3 R101", "DLV3+ R50", "DLV3+ R101"]
     
     n_wierszy = len(wylosowane_pary)
     n_kolumn = len(kolumny)
-    
+
+    # --- 4. RYSOWANIE DUZEJ SIATKI ---
+    print("\nGenerowanie glownego wykresu (siatki 5x8)...")
     fig, axes = plt.subplots(n_wierszy, n_kolumn, figsize=(22, 12))
     
     for w in range(n_wierszy):
@@ -233,16 +233,41 @@ if __name__ == "__main__":
             else:
                 ax.imshow(obraz_do_wyswietlenia, cmap="gray", vmin=0, vmax=1)
                 
-            # Usuwamy osie
             ax.set_xticks([])
             ax.set_yticks([])
             
-            # Tytuły tylko w pierwszym rzędzie
             if w == 0:
                 ax.set_title(tytuly[k], fontsize=14, fontweight="bold")
 
     plt.tight_layout()
-    # Zapis
-    nazwa_pliku = "porownanie_masek.png"
+    nazwa_pliku = "porownanie_masek_zbiorcze.png"
     plt.savefig(nazwa_pliku, bbox_inches='tight', dpi=150)
-    print(f"\n✅ Gotowe! Zapisano obraz jako '{nazwa_pliku}' w folderze projektu.")
+    plt.close(fig)
+    print(f"Zapisano zbiorczy obraz jako '{nazwa_pliku}'.")
+
+    # --- 5. RYSOWANIE POJEDYNCZYCH SIATEK (4 KOLUMNY x 2 WIERSZE) ---
+    print("\nGenerowanie osobnych wykresow dla poszczegolnych przykladow (siatki 4x2)...")
+    for w in range(n_wierszy):
+        fig_small, axes_small = plt.subplots(2, 4, figsize=(16, 8))
+        
+        for k, kolumna in enumerate(kolumny):
+            row = k // 4
+            col = k % 4
+            ax = axes_small[row, col]
+            
+            obraz_do_wyswietlenia = wyniki_wizualne[kolumna][w]
+            
+            if kolumna == "orig":
+                ax.imshow(obraz_do_wyswietlenia)
+            else:
+                ax.imshow(obraz_do_wyswietlenia, cmap="gray", vmin=0, vmax=1)
+                
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_title(tytuly[k], fontsize=12, fontweight="bold")
+            
+        plt.tight_layout()
+        nazwa_pliku_male = f"porownanie_masek_przyklad_{w+1}.png"
+        plt.savefig(nazwa_pliku_male, bbox_inches='tight', dpi=150)
+        plt.close(fig_small)
+        print(f"Zapisano osobny obraz dla przykladu {w+1}: '{nazwa_pliku_male}'")

@@ -1,4 +1,5 @@
 import os
+import cv2
 import torch
 import numpy as np
 from PIL import Image
@@ -34,7 +35,8 @@ FOLDER_MAPPING = {
 }
 
 test_transform = A.Compose([
-    A.Resize(512, 512), 
+    A.LongestMaxSize(max_size=512), 
+    A.PadIfNeeded(min_height=512, min_width=512, border_mode=cv2.BORDER_REFLECT_101),
     A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ToTensorV2()
 ])
@@ -99,6 +101,7 @@ class PratheepanDataset(Dataset):
 def evaluate_model(model, dataloader, model_type):
     model.eval()
     iou_scores, dice_scores = [], []
+    precision_scores, recall_scores, accuracy_scores = [], [], []
 
     with torch.no_grad():
         for batch in tqdm(dataloader, desc=f"Testowanie ({model_type})"):
@@ -130,16 +133,28 @@ def evaluate_model(model, dataloader, model_type):
 
             label_bin = (labels == 1)
 
-            intersection = (pred_bin & label_bin).sum(dim=(1, 2)).float()
+            # Obliczanie podstawowych wartości (True Positives, False Positives, False Negatives, True Negatives)
+            TP = (pred_bin & label_bin).sum(dim=(1, 2)).float()
+            FP = (pred_bin & ~label_bin).sum(dim=(1, 2)).float()
+            FN = (~pred_bin & label_bin).sum(dim=(1, 2)).float()
+            TN = (~pred_bin & ~label_bin).sum(dim=(1, 2)).float()
+
             union = (pred_bin | label_bin).sum(dim=(1, 2)).float()
 
-            iou = (intersection / (union + 1e-8)).cpu().numpy()
-            dice = (2 * intersection / (pred_bin.sum(dim=(1, 2)) + label_bin.sum(dim=(1, 2)) + 1e-8)).cpu().numpy()
+            # Obliczanie metryk z zabezpieczeniem przed dzieleniem przez zero (1e-8)
+            iou = (TP / (union + 1e-8)).cpu().numpy()
+            dice = (2 * TP / (2 * TP + FP + FN + 1e-8)).cpu().numpy() # To jest równe F1-Score
+            precision = (TP / (TP + FP + 1e-8)).cpu().numpy()
+            recall = (TP / (TP + FN + 1e-8)).cpu().numpy()
+            accuracy = ((TP + TN) / (TP + TN + FP + FN + 1e-8)).cpu().numpy()
 
             iou_scores.extend(iou)
             dice_scores.extend(dice)
+            precision_scores.extend(precision)
+            recall_scores.extend(recall)
+            accuracy_scores.extend(accuracy)
 
-    return np.mean(iou_scores), np.mean(dice_scores)
+    return np.mean(iou_scores), np.mean(dice_scores), np.mean(precision_scores), np.mean(recall_scores), np.mean(accuracy_scores)
 
 # ==========================================
 # GLOWNA PETLA
@@ -167,8 +182,8 @@ if __name__ == "__main__":
             ignore_mismatched_sizes=True
         ).to(DEVICE)
         
-        iou_seg, dice_seg = evaluate_model(model_seg, test_loader, model_type="segformer")
-        wyniki.append(["SegFormer", f"{iou_seg:.4f}", f"{dice_seg:.4f}"])
+        iou_val, dice_val, prec_val, rec_val, acc_val = evaluate_model(model_seg, test_loader, model_type="segformer")
+        wyniki.append(["SegFormer", f"{iou_val:.4f}", f"{dice_val:.4f}", f"{prec_val:.4f}", f"{rec_val:.4f}", f"{acc_val:.4f}"])
         del model_seg
         torch.cuda.empty_cache()
     except Exception as e:
@@ -211,7 +226,7 @@ if __name__ == "__main__":
             if 'state_dict' in state_dict:
                 state_dict = state_dict['state_dict']
                 
-            # Czyszczenie wag z przedrostka _orig_mod. (po kompilacji modelu)
+            # Czyszczenie wag z przedrostka _orig_mod.
             cleaned_state_dict = {}
             for k, v in state_dict.items():
                 new_k = k.replace('_orig_mod.', '')
@@ -220,8 +235,8 @@ if __name__ == "__main__":
             model.load_state_dict(cleaned_state_dict)
             model = model.to(DEVICE)
             
-            iou, dice = evaluate_model(model, test_loader, model_type=config['eval_type'])
-            wyniki.append([config['name'], f"{iou:.4f}", f"{dice:.4f}"])
+            iou_val, dice_val, prec_val, rec_val, acc_val = evaluate_model(model, test_loader, model_type=config['eval_type'])
+            wyniki.append([config['name'], f"{iou_val:.4f}", f"{dice_val:.4f}", f"{prec_val:.4f}", f"{rec_val:.4f}", f"{acc_val:.4f}"])
             
             del model
             torch.cuda.empty_cache()
@@ -229,10 +244,10 @@ if __name__ == "__main__":
             print(f"Blad ladowania {config['name']}: {e}")
 
     # --- PODSUMOWANIE ---
-    print("\n" + "="*60)
+    print("\n" + "="*85)
     print("WYNIKI POROWNANIA MODELI (PRATHEEPAN DATASET)")
-    print("="*60)
+    print("="*85)
     if wyniki:
-        print(tabulate(wyniki, headers=["Model", "Srednie IoU", "Sredni Dice"], tablefmt="grid"))
+        print(tabulate(wyniki, headers=["Model", "IoU", "Dice (F1)", "Precision", "Recall", "Accuracy"], tablefmt="grid"))
     else:
         print("Nie udalo sie przetestowac zadnego modelu.")
