@@ -33,7 +33,7 @@ VIS_LIMIT_PER_MODEL = 5 # <--- Twój limit obrazków dla raportu
 
 MODELS_DIR = "models"
 SEGFORMER_DIR = "models"
-UNET_PATH = os.path.join(MODELS_DIR, "unet_skin_1.pth")
+UNET_PATH = os.path.join(MODELS_DIR, "unet_skin_best.pth")
 DEEPLABV3_R50_PATH = os.path.join(MODELS_DIR, "deeplabv3_resnet50_model_best.pth")
 DEEPLABV3_R101_PATH = os.path.join(MODELS_DIR, "deeplabv3_resnet101_model_best.pth")
 DEEPLABV3P_R50_PATH = os.path.join(MODELS_DIR, "deeplabv3plus_resnet50_model_best.pth")
